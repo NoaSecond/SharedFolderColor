@@ -1,0 +1,2 @@
+# SharedFolderColor
+Unreal Engine Plugin
