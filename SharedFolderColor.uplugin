@@ -1,0 +1,22 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "1.0 - UE5.7",
+    "FriendlyName": "SharedFolderColor",
+    "Description": "Share folder color mappings via a JSON file so they can be committed to Git.",
+    "Category": "Editor",
+    "CreatedBy": "Noa Second",
+	"CreatedByURL": "https://noasecond.com",
+	"DocsURL": "https://noasecond.com",
+	"MarketplaceURL": "https://noasecond.com",
+	"SupportURL": "https://noasecond.com",
+    "Icon": "Resources/Icon128.png",
+    "CanContainContent": false,
+    "Modules": [
+        {
+        "Name": "SharedFolderColorEditor",
+        "Type": "Editor",
+        "LoadingPhase": "Startup"
+        }
+    ]
+}
