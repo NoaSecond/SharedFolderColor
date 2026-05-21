@@ -17,7 +17,7 @@ static FString GetSharedColorsPath()
 
 static FString GetColorIniSection()
 {
-    return TEXT("SharedFolderColor.PathColors");
+    return TEXT("PathColor");
 }
 
 void FSharedFolderColorEditorModule::StartupModule()
@@ -25,13 +25,18 @@ void FSharedFolderColorEditorModule::StartupModule()
     // Load and apply colors automatically at startup
     LoadAndApplyColors();
 
+    // Export immediately so the shared file exists as soon as the plugin loads
+    ExportColors();
+
     // Set up a timer to check for changes every 2 seconds and auto-export
     if (GEditor)
     {
+        FTimerDelegate AutoExportDelegate;
+        AutoExportDelegate = FTimerDelegate::CreateRaw(this, &FSharedFolderColorEditorModule::CheckAndExportColors);
+
         GEditor->GetTimerManager()->SetTimer(
             AutoExportTimerHandle,
-            this,
-            &FSharedFolderColorEditorModule::CheckAndExportColors,
+            AutoExportDelegate,
             2.0f,
             true  // Loop
         );

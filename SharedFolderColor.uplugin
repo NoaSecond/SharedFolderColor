@@ -7,16 +7,17 @@
     "Category": "Editor",
     "CreatedBy": "Noa Second",
 	"CreatedByURL": "https://noasecond.com",
-	"DocsURL": "https://noasecond.com",
-	"MarketplaceURL": "https://noasecond.com",
-	"SupportURL": "https://noasecond.com",
+	"DocsURL": "https://github.com/NoaSecond/SharedFolderColor/blob/main/README.md",
+	"MarketplaceURL": "https://github.com/NoaSecond/SharedFolderColor",
+	"SupportURL": "https://github.com/NoaSecond/SharedFolderColor",
     "Icon": "Resources/Icon128.png",
     "CanContainContent": false,
+    "EnabledByDefault": true,
     "Modules": [
         {
-        "Name": "SharedFolderColorEditor",
-        "Type": "Editor",
-        "LoadingPhase": "Startup"
+            "Name": "SharedFolderColorEditor",
+            "Type": "Editor",
+            "LoadingPhase": "Default"
         }
     ]
 }
