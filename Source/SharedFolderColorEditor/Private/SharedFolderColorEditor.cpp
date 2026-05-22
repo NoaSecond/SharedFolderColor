@@ -4,6 +4,8 @@
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
 #include "Misc/ConfigCacheIni.h"
+#include "HAL/FileManager.h"
+#include "ContentBrowserModule.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
 #include "Editor.h"
@@ -27,6 +29,10 @@ void FSharedFolderColorEditorModule::StartupModule()
     // Load and apply colors automatically at startup
     LoadAndApplyColors();
 
+    // Listen for folder color changes so the shared JSON updates immediately.
+    FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+    SetFolderColorDelegateHandle = ContentBrowserModule.GetOnSetFolderColor().AddRaw(this, &FSharedFolderColorEditorModule::OnFolderColorChanged);
+
     // Export immediately so the shared file exists as soon as the plugin loads
     ExportColors();
 
@@ -49,9 +55,20 @@ void FSharedFolderColorEditorModule::StartupModule()
 
 void FSharedFolderColorEditorModule::ShutdownModule()
 {
+    if (SetFolderColorDelegateHandle.IsValid() && FModuleManager::Get().IsModuleLoaded(TEXT("ContentBrowser")))
+    {
+        FContentBrowserModule& ContentBrowserModule = FModuleManager::GetModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+        ContentBrowserModule.GetOnSetFolderColor().Remove(SetFolderColorDelegateHandle);
+    }
+
     if (GEditor && AutoExportTimerHandle.IsValid())
     {
         GEditor->GetTimerManager()->ClearTimer(AutoExportTimerHandle);
+    }
+
+    if (GEditor && PendingExportTimerHandle.IsValid())
+    {
+        GEditor->GetTimerManager()->ClearTimer(PendingExportTimerHandle);
     }
 
     // Final export before shutdown
@@ -88,6 +105,9 @@ void FSharedFolderColorEditorModule::LoadAndApplyColors()
                     }
                 }
                 GConfig->Flush(false, GEditorPerProjectIni);
+
+                LastImportedSharedColorsState = Input;
+                LastExportedState = BuildCurrentColorState();
                 
                 UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor: Loaded %d colors from %s"), Root->Values.Num(), *Path);
             }
@@ -97,16 +117,57 @@ void FSharedFolderColorEditorModule::LoadAndApplyColors()
 
 void FSharedFolderColorEditorModule::CheckAndExportColors()
 {
+    if (HasSharedColorsFileChanged())
+    {
+        LoadAndApplyColors();
+    }
+
     if (HasColorsChanged())
     {
         ExportColors();
     }
 }
 
+void FSharedFolderColorEditorModule::OnFolderColorChanged(const FString& FolderPath)
+{
+    UE_LOG(LogTemp, Verbose, TEXT("SharedFolderColor: folder color changed for %s"), *FolderPath);
+    ScheduleExport();
+}
+
+void FSharedFolderColorEditorModule::ScheduleExport()
+{
+    if (!GEditor)
+    {
+        ExportColors();
+        return;
+    }
+
+    FTimerDelegate ExportDelegate = FTimerDelegate::CreateRaw(this, &FSharedFolderColorEditorModule::ExportColors);
+    GEditor->GetTimerManager()->ClearTimer(PendingExportTimerHandle);
+    GEditor->GetTimerManager()->SetTimer(PendingExportTimerHandle, ExportDelegate, 0.25f, false);
+}
+
 bool FSharedFolderColorEditorModule::HasColorsChanged() const
 {
+    return BuildCurrentColorState() != LastExportedState;
+}
+
+bool FSharedFolderColorEditorModule::HasSharedColorsFileChanged() const
+{
+    const FString Path = GetSharedColorsPath();
+    if (!FPaths::FileExists(Path))
+    {
+        return false;
+    }
+
+    FString Input;
+    return FFileHelper::LoadFileToString(Input, *Path) && Input != LastImportedSharedColorsState;
+}
+
+FString FSharedFolderColorEditorModule::BuildCurrentColorState() const
+{
     const FString Section = GetColorIniSection();
-    
+
     TArray<FString> SectionLines;
     GConfig->GetSection(*Section, SectionLines, GEditorPerProjectIni);
 
@@ -116,7 +177,7 @@ bool FSharedFolderColorEditorModule::HasColorsChanged() const
         CurrentState += Line + TEXT("\n");
     }
 
-    return CurrentState != LastExportedState;
+    return CurrentState;
 }
 
 void FSharedFolderColorEditorModule::ExportColors()
@@ -147,11 +208,8 @@ void FSharedFolderColorEditorModule::ExportColors()
         const FString Path = GetSharedColorsPath();
         if (FFileHelper::SaveStringToFile(Output, *Path))
         {
-            LastExportedState.Empty();
-            for (const FString& Line : SectionLines)
-            {
-                LastExportedState += Line + TEXT("\n");
-            }
+            LastExportedState = BuildCurrentColorState();
+            LastImportedSharedColorsState = Output;
             UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor: Auto-exported %d colors to %s"), Root->Values.Num(), *Path);
         }
     }
