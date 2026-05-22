@@ -1,7 +1,7 @@
 {
     "FileVersion": 3,
     "Version": 1,
-    "VersionName": "1.0.1 - UE5.7",
+    "VersionName": "1.0.2 - UE5.7",
     "EngineVersion": "5.7",
     "FriendlyName": "SharedFolderColor",
     "Description": "Share folder color mappings via a JSON file so they can be committed to Git.",
