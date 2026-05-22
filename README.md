@@ -77,7 +77,7 @@ After installation, use the context menu in the Content Browser to apply a color
 
 ## License
 
-This plugin is distributed under the Fab Adapted License. See the `LICENSE` file in this repository for the full text.
+This plugin is distributed under the Fab Standard License.
 
 ## Support
 
