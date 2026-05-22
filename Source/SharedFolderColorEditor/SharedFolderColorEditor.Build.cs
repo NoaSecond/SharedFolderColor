@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Noa Second
+// All rights reserved.
+
 using UnrealBuildTool;
 using System.Collections.Generic;
 
