@@ -5,7 +5,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/ConfigCacheIni.h"
 #include "HAL/FileManager.h"
-#include "ContentBrowserModule.h"
+
 #include "TimerManager.h"
 #include "Engine/World.h"
 #include "Editor.h"
@@ -29,10 +29,6 @@ void FSharedFolderColorEditorModule::StartupModule()
     // Load and apply colors automatically at startup
     LoadAndApplyColors();
 
-    // Listen for folder color changes so the shared JSON updates immediately.
-    FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
-    SetFolderColorDelegateHandle = ContentBrowserModule.GetOnSetFolderColor().AddRaw(this, &FSharedFolderColorEditorModule::OnFolderColorChanged);
-
     // Export immediately so the shared file exists as soon as the plugin loads
     ExportColors();
 
@@ -55,20 +51,10 @@ void FSharedFolderColorEditorModule::StartupModule()
 
 void FSharedFolderColorEditorModule::ShutdownModule()
 {
-    if (SetFolderColorDelegateHandle.IsValid() && FModuleManager::Get().IsModuleLoaded(TEXT("ContentBrowser")))
-    {
-        FContentBrowserModule& ContentBrowserModule = FModuleManager::GetModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
-        ContentBrowserModule.GetOnSetFolderColor().Remove(SetFolderColorDelegateHandle);
-    }
 
     if (GEditor && AutoExportTimerHandle.IsValid())
     {
         GEditor->GetTimerManager()->ClearTimer(AutoExportTimerHandle);
-    }
-
-    if (GEditor && PendingExportTimerHandle.IsValid())
-    {
-        GEditor->GetTimerManager()->ClearTimer(PendingExportTimerHandle);
     }
 
     // Final export before shutdown
@@ -128,24 +114,6 @@ void FSharedFolderColorEditorModule::CheckAndExportColors()
     }
 }
 
-void FSharedFolderColorEditorModule::OnFolderColorChanged(const FString& FolderPath)
-{
-    UE_LOG(LogTemp, Verbose, TEXT("SharedFolderColor: folder color changed for %s"), *FolderPath);
-    ScheduleExport();
-}
-
-void FSharedFolderColorEditorModule::ScheduleExport()
-{
-    if (!GEditor)
-    {
-        ExportColors();
-        return;
-    }
-
-    FTimerDelegate ExportDelegate = FTimerDelegate::CreateRaw(this, &FSharedFolderColorEditorModule::ExportColors);
-    GEditor->GetTimerManager()->ClearTimer(PendingExportTimerHandle);
-    GEditor->GetTimerManager()->SetTimer(PendingExportTimerHandle, ExportDelegate, 0.25f, false);
-}
 
 bool FSharedFolderColorEditorModule::HasColorsChanged() const
 {
