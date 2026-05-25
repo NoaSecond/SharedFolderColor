@@ -3,8 +3,9 @@
 
 #pragma once
 
+#include "Delegates/Delegate.h"
 #include "Modules/ModuleManager.h"
-#include "Containers/Map.h"
+#include "TimerManager.h"
 
 class FSharedFolderColorEditorModule : public IModuleInterface
 {
@@ -16,9 +17,16 @@ private:
     void LoadAndApplyColors();
     void ExportColors();
     void CheckAndExportColors();
+    void OnFolderColorChanged(const FString& FolderPath);
+    void ScheduleExport();
     bool HasColorsChanged() const;
+    bool HasSharedColorsFileChanged() const;
+    FString BuildCurrentColorState() const;
 
     FTimerHandle AutoExportTimerHandle;
+    FTimerHandle PendingExportTimerHandle;
+    FDelegateHandle SetFolderColorDelegateHandle;
     FString LastExportedState;
+    FString LastImportedSharedColorsState;
 };
 
