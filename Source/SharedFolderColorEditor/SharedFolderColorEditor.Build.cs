@@ -17,7 +17,6 @@ public class SharedFolderColorEditor : ModuleRules
             "Engine",
             "Slate",
             "SlateCore",
-            "EditorStyle",
             "UnrealEd",
             "LevelEditor",
             "ContentBrowser",
