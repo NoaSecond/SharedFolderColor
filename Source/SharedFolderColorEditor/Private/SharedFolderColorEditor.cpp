@@ -13,6 +13,65 @@
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 #include "JsonUtilities.h"
+#include "ISourceControlModule.h"
+#include "ISourceControlProvider.h"
+#include "SourceControlOperations.h"
+#include "HAL/PlatformFileManager.h"
+
+static bool CheckoutOrMakeWritable(const FString& FilePath)
+{
+    IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+    if (!PlatformFile.FileExists(*FilePath))
+    {
+        return true;
+    }
+
+    if (!PlatformFile.IsReadOnly(*FilePath))
+    {
+        return true;
+    }
+
+    if (ISourceControlModule::Get().IsEnabled())
+    {
+        ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
+        FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(FilePath, EStateCacheUsage::ForceUpdate);
+        if (SourceControlState.IsValid())
+        {
+            if (SourceControlState->CanCheckout())
+            {
+                TSharedRef<FCheckOut, ESPMode::ThreadSafe> CheckoutOp = ISourceControlOperation::Create<FCheckOut>();
+                if (SourceControlProvider.Execute(CheckoutOp, FilePath) == ECommandResult::Succeeded)
+                {
+                    UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Successfully checked out %s"), *FilePath);
+                    return true;
+                }
+            }
+        }
+    }
+
+    if (PlatformFile.SetReadOnly(*FilePath, false))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor: Made file writable (cleared read-only attribute): %s"), *FilePath);
+        return true;
+    }
+
+    return false;
+}
+
+static void MarkForAddIfSourceControlEnabled(const FString& FilePath)
+{
+    if (ISourceControlModule::Get().IsEnabled())
+    {
+        ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
+        FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(FilePath, EStateCacheUsage::ForceUpdate);
+        if (SourceControlState.IsValid() && !SourceControlState->IsSourceControlled())
+        {
+            TSharedRef<FMarkForAdd, ESPMode::ThreadSafe> MarkForAddOp = ISourceControlOperation::Create<FMarkForAdd>();
+            SourceControlProvider.Execute(MarkForAddOp, FilePath);
+            UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Marked %s for add in source control"), *FilePath);
+        }
+    }
+}
 
 static FString GetSharedColorsPath()
 {
@@ -206,11 +265,20 @@ void FSharedFolderColorEditorModule::ExportColors()
     if (FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
     {
         const FString Path = GetSharedColorsPath();
+        
+        CheckoutOrMakeWritable(Path);
+        const bool bFileExists = FPlatformFileManager::Get().GetPlatformFile().FileExists(*Path);
+
         if (FFileHelper::SaveStringToFile(Output, *Path))
         {
             LastExportedState = BuildCurrentColorState();
             LastImportedSharedColorsState = Output;
             UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor: Auto-exported %d colors to %s"), Root->Values.Num(), *Path);
+
+            if (!bFileExists)
+            {
+                MarkForAddIfSourceControlEnabled(Path);
+            }
         }
     }
 }

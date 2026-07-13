@@ -22,7 +22,8 @@ public class SharedFolderColorEditor : ModuleRules
             "LevelEditor",
             "ContentBrowser",
             "Json",
-            "JsonUtilities"
+            "JsonUtilities",
+            "SourceControl"
         });
     }
 }
