@@ -165,9 +165,10 @@ static bool DoesFolderExist(const FString& InFolderPath)
     }
 
     // 4. Content Browser Data Subsystem check (covers virtual and C++ class folders)
-    if (IContentBrowserDataModule::IsAvailable())
+    IContentBrowserDataModule* ContentBrowserDataModule = IContentBrowserDataModule::GetPtr();
+    if (ContentBrowserDataModule)
     {
-        UContentBrowserDataSubsystem* Subsystem = IContentBrowserDataModule::Get().GetSubsystem();
+        UContentBrowserDataSubsystem* Subsystem = ContentBrowserDataModule->GetSubsystem();
         if (Subsystem)
         {
             TArray<FContentBrowserItem> Items = Subsystem->GetItemsAtUserProvidedPath(FolderPath, EContentBrowserItemTypeFilter::IncludeFolders);
@@ -414,13 +415,14 @@ void FSharedFolderColorEditorModule::OnFolderPathChanged(TArrayView<const TTuple
     ScheduleExport();
 }
 
-void FSharedFolderColorEditorModule::OnPathsRemoved(const TArray<FString>& RemovedPaths)
+void FSharedFolderColorEditorModule::OnPathsRemoved(TConstArrayView<FStringView> RemovedPaths)
 {
     const FString Section = GetColorIniSection();
     bool bModified = false;
 
-    for (const FString& RemovedPath : RemovedPaths)
+    for (const FStringView& RemovedPathView : RemovedPaths)
     {
+        const FString RemovedPath(RemovedPathView);
         FString ColorValue;
         if (GConfig->GetString(*Section, *RemovedPath, ColorValue, GEditorPerProjectIni))
         {
