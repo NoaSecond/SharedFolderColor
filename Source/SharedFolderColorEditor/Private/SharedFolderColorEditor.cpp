@@ -70,7 +70,7 @@ static void RevertIfUnchanged(const FString& FilePath)
     if (ISourceControlModule::Get().IsEnabled())
     {
         ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
-        FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(FilePath, EStateCacheUsage::Use);
+        FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(FilePath, EStateCacheUsage::ForceUpdate);
         if (SourceControlState.IsValid() && SourceControlState->IsCheckedOut())
         {
             TSharedRef<FRevertUnchanged, ESPMode::ThreadSafe> RevertOp = ISourceControlOperation::Create<FRevertUnchanged>();
@@ -165,9 +165,10 @@ static bool DoesFolderExist(const FString& InFolderPath)
     }
 
     // 4. Content Browser Data Subsystem check (covers virtual and C++ class folders)
-    if (IContentBrowserDataModule::IsAvailable())
+    IContentBrowserDataModule* ContentBrowserDataModule = IContentBrowserDataModule::GetPtr();
+    if (ContentBrowserDataModule)
     {
-        UContentBrowserDataSubsystem* Subsystem = IContentBrowserDataModule::Get().GetSubsystem();
+        UContentBrowserDataSubsystem* Subsystem = ContentBrowserDataModule->GetSubsystem();
         if (Subsystem)
         {
             TArray<FContentBrowserItem> Items = Subsystem->GetItemsAtUserProvidedPath(FolderPath, EContentBrowserItemTypeFilter::IncludeFolders);
@@ -340,7 +341,7 @@ void FSharedFolderColorEditorModule::LoadAndApplyColors()
 
                     if (bCanPrune && !DoesFolderExist(Key))
                     {
-                        UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Skipping non-existent folder '%s' during import"), *Key);
+                        UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Skipped color for non-existent folder during load: '%s'"), *Key);
                         continue;
                     }
 
@@ -361,7 +362,7 @@ void FSharedFolderColorEditorModule::LoadAndApplyColors()
                 LastImportedSharedColorsState = Input;
                 LastExportedState = BuildCurrentColorState();
                 
-                UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Loaded %d colors from %s"), Root->Values.Num(), *Path);
+                UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Loaded %d colors from %s"), Root->Values.Num(), *Path);
             }
         }
     }
@@ -382,7 +383,7 @@ void FSharedFolderColorEditorModule::CheckAndExportColors()
 
 void FSharedFolderColorEditorModule::OnFolderColorChanged(const FString& FolderPath)
 {
-    UE_LOG(LogTemp, Verbose, TEXT("SharedFolderColor: Folder color changed for %s"), *FolderPath);
+    UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Folder color changed for '%s'"), *FolderPath);
     ScheduleExport();
 }
 
@@ -402,7 +403,7 @@ void FSharedFolderColorEditorModule::OnFolderPathChanged(TArrayView<const TTuple
             GConfig->RemoveKey(*Section, *OldPath, GEditorPerProjectIni);
             GConfig->SetString(*Section, *NewPath, *ColorValue, GEditorPerProjectIni);
             bModified = true;
-            UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Updated folder color path from '%s' to '%s'"), *OldPath, *NewPath);
+            UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Renamed folder color: '%s' -> '%s'"), *OldPath, *NewPath);
         }
     }
 
@@ -414,19 +415,20 @@ void FSharedFolderColorEditorModule::OnFolderPathChanged(TArrayView<const TTuple
     ScheduleExport();
 }
 
-void FSharedFolderColorEditorModule::OnPathsRemoved(const TArray<FString>& RemovedPaths)
+void FSharedFolderColorEditorModule::OnPathsRemoved(TConstArrayView<FStringView> RemovedPaths)
 {
     const FString Section = GetColorIniSection();
     bool bModified = false;
 
-    for (const FString& RemovedPath : RemovedPaths)
+    for (const FStringView& RemovedPathView : RemovedPaths)
     {
+        const FString RemovedPath(RemovedPathView);
         FString ColorValue;
         if (GConfig->GetString(*Section, *RemovedPath, ColorValue, GEditorPerProjectIni))
         {
             GConfig->RemoveKey(*Section, *RemovedPath, GEditorPerProjectIni);
             bModified = true;
-            UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Removed deleted folder '%s' from color configuration"), *RemovedPath);
+            UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Removed color for deleted folder '%s'"), *RemovedPath);
         }
     }
 
@@ -554,7 +556,7 @@ void FSharedFolderColorEditorModule::ExportColors()
 
             if (bCanPrune && !DoesFolderExist(Key))
             {
-                UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Removing non-existent folder '%s' from color configuration"), *Key);
+                UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Removed color for non-existent folder '%s'"), *Key);
                 GConfig->RemoveKey(*Section, *Key, GEditorPerProjectIni);
                 bIniModified = true;
                 continue;
@@ -590,12 +592,12 @@ void FSharedFolderColorEditorModule::ExportColors()
 
     // Check if the file already exists on disk and whether its content is identical
     const bool bFileExists = FPlatformFileManager::Get().GetPlatformFile().FileExists(*Path);
+    TSharedPtr<FJsonObject> ExistingRoot;
     if (bFileExists)
     {
         FString ExistingContent;
         if (FFileHelper::LoadFileToString(ExistingContent, *Path))
         {
-            TSharedPtr<FJsonObject> ExistingRoot;
             TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ExistingContent);
             if (FJsonSerializer::Deserialize(Reader, ExistingRoot) && ExistingRoot.IsValid())
             {
@@ -611,6 +613,30 @@ void FSharedFolderColorEditorModule::ExportColors()
         }
     }
 
+    // Log added, updated, or removed folder colors
+    for (const auto& Pair : Root->Values)
+    {
+        if (!ExistingRoot.IsValid() || !ExistingRoot->Values.Contains(Pair.Key))
+        {
+            UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Added folder color: '%s' = %s"), *Pair.Key, *Pair.Value->AsString());
+        }
+        else if (ExistingRoot->Values[Pair.Key]->AsString() != Pair.Value->AsString())
+        {
+            UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Updated folder color: '%s' = %s"), *Pair.Key, *Pair.Value->AsString());
+        }
+    }
+
+    if (ExistingRoot.IsValid())
+    {
+        for (const auto& Pair : ExistingRoot->Values)
+        {
+            if (!Root->Values.Contains(Pair.Key))
+            {
+                UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Removed folder color: '%s'"), *Pair.Key);
+            }
+        }
+    }
+
     // File doesn't exist or content changed: checkout or make writable before saving
     if (!CheckoutOrMakeWritable(Path))
     {
@@ -622,11 +648,19 @@ void FSharedFolderColorEditorModule::ExportColors()
     {
         LastExportedState = BuildCurrentColorState();
         LastImportedSharedColorsState = Output;
-        UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Auto-exported %d colors to %s"), Root->Values.Num(), *Path);
+        UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Auto-exported %d colors to %s"), Root->Values.Num(), *Path);
 
         if (!bFileExists)
         {
             MarkForAddIfSourceControlEnabled(Path);
+        }
+        else
+        {
+            // Le fichier existait déjà : si le contenu sauvegardé correspond
+            // à la version dépôt (ex. suppression d'un dossier coloré qui ramène
+            // le JSON à son état initial), on revert le checkout pour éviter un
+            // checkout parasite.
+            RevertIfUnchanged(Path);
         }
     }
 }
