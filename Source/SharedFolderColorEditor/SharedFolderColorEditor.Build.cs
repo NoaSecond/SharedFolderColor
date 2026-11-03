@@ -21,6 +21,9 @@ public class SharedFolderColorEditor : ModuleRules
             "UnrealEd",
             "LevelEditor",
             "ContentBrowser",
+            "ContentBrowserData",
+            "AssetRegistry",
+            "AssetTools",
             "Json",
             "JsonUtilities",
             "SourceControl"

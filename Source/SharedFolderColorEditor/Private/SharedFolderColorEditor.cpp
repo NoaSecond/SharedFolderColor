@@ -1,11 +1,19 @@
 // Copyright (c) 2026 Noa Second
 // All rights reserved.
+
 #include "SharedFolderColorEditor.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/PackageName.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformFileManager.h"
 #include "ContentBrowserModule.h"
+#include "ContentBrowserDataSubsystem.h"
+#include "IContentBrowserDataModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetToolsModule.h"
+#include "AssetViewUtils.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
 #include "Editor.h"
@@ -16,7 +24,6 @@
 #include "ISourceControlModule.h"
 #include "ISourceControlProvider.h"
 #include "SourceControlOperations.h"
-#include "HAL/PlatformFileManager.h"
 
 static bool CheckoutOrMakeWritable(const FString& FilePath)
 {
@@ -58,6 +65,20 @@ static bool CheckoutOrMakeWritable(const FString& FilePath)
     return false;
 }
 
+static void RevertIfUnchanged(const FString& FilePath)
+{
+    if (ISourceControlModule::Get().IsEnabled())
+    {
+        ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
+        FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(FilePath, EStateCacheUsage::Use);
+        if (SourceControlState.IsValid() && SourceControlState->IsCheckedOut())
+        {
+            TSharedRef<FRevertUnchanged, ESPMode::ThreadSafe> RevertOp = ISourceControlOperation::Create<FRevertUnchanged>();
+            SourceControlProvider.Execute(RevertOp, FilePath);
+        }
+    }
+}
+
 static void MarkForAddIfSourceControlEnabled(const FString& FilePath)
 {
     if (ISourceControlModule::Get().IsEnabled())
@@ -83,6 +104,117 @@ static FString GetColorIniSection()
     return TEXT("PathColor");
 }
 
+static bool IsAssetRegistryReady()
+{
+    if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
+    {
+        FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        return !AssetRegistryModule.Get().IsLoadingAssets();
+    }
+    return false;
+}
+
+static bool DoesFolderExist(const FString& InFolderPath)
+{
+    FString FolderPath = InFolderPath;
+    FolderPath.TrimQuotesInline();
+    FolderPath.TrimStartAndEndInline();
+
+    if (FolderPath.IsEmpty())
+    {
+        return false;
+    }
+
+    // 1. Direct directory on disk (if absolute or project-relative filesystem path)
+    if (FPaths::DirectoryExists(FolderPath))
+    {
+        return true;
+    }
+
+    // 2. Long package path converted to filesystem directory (e.g. /Game/Foo -> <ContentDir>/Foo)
+    FString DiskPath;
+    FString FolderPathWithSlash = FolderPath;
+    if (!FolderPathWithSlash.EndsWith(TEXT("/")))
+    {
+        FolderPathWithSlash += TEXT("/");
+    }
+
+    if (FPackageName::TryConvertLongPackageNameToFilename(FolderPathWithSlash, DiskPath) && FPaths::DirectoryExists(DiskPath))
+    {
+        return true;
+    }
+
+    if (FPackageName::TryConvertLongPackageNameToFilename(FolderPath, DiskPath) && FPaths::DirectoryExists(DiskPath))
+    {
+        return true;
+    }
+
+    // 3. Asset Registry path check
+    if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
+    {
+        FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+        FString FolderPathNoSlash = FolderPath;
+        FolderPathNoSlash.RemoveFromEnd(TEXT("/"));
+
+        if (AssetRegistry.PathExists(FolderPathNoSlash) || AssetRegistry.PathExists(FolderPathWithSlash))
+        {
+            return true;
+        }
+    }
+
+    // 4. Content Browser Data Subsystem check (covers virtual and C++ class folders)
+    if (IContentBrowserDataModule::IsAvailable())
+    {
+        UContentBrowserDataSubsystem* Subsystem = IContentBrowserDataModule::Get().GetSubsystem();
+        if (Subsystem)
+        {
+            TArray<FContentBrowserItem> Items = Subsystem->GetItemsAtUserProvidedPath(FolderPath, EContentBrowserItemTypeFilter::IncludeFolders);
+            if (Items.Num() > 0)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool AreJsonObjectsEqual(const TSharedPtr<FJsonObject>& A, const TSharedPtr<FJsonObject>& B)
+{
+    if (!A.IsValid() || !B.IsValid())
+    {
+        return A == B;
+    }
+
+    if (A->Values.Num() != B->Values.Num())
+    {
+        return false;
+    }
+
+    for (const auto& Pair : A->Values)
+    {
+        const TSharedPtr<FJsonValue>* FoundValue = B->Values.Find(Pair.Key);
+        if (!FoundValue || !(*FoundValue).IsValid())
+        {
+            return false;
+        }
+
+        if (Pair.Value->Type != (*FoundValue)->Type)
+        {
+            return false;
+        }
+
+        if (Pair.Value->AsString() != (*FoundValue)->AsString())
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void FSharedFolderColorEditorModule::StartupModule()
 {
     // Load and apply colors automatically at startup
@@ -92,7 +224,17 @@ void FSharedFolderColorEditorModule::StartupModule()
     FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
     SetFolderColorDelegateHandle = ContentBrowserModule.GetOnSetFolderColor().AddRaw(this, &FSharedFolderColorEditorModule::OnFolderColorChanged);
 
-    // Export immediately so the shared file exists as soon as the plugin loads
+    // Listen for folder moves and renames
+    FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+    FolderPathChangedDelegateHandle = AssetViewUtils::OnFolderPathChanged().AddRaw(this, &FSharedFolderColorEditorModule::OnFolderPathChanged);
+
+    // Listen for folder deletions and asset registry scan completion
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+    IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+    PathsRemovedDelegateHandle = AssetRegistry.OnPathsRemoved().AddRaw(this, &FSharedFolderColorEditorModule::OnPathsRemoved);
+    FilesLoadedDelegateHandle = AssetRegistry.OnFilesLoaded().AddRaw(this, &FSharedFolderColorEditorModule::OnAssetRegistryFilesLoaded);
+
+    // Initial export check (will NOT checkout if file exists and content is unchanged)
     ExportColors();
 
     // Set up a timer to check for changes every 2 seconds and auto-export
@@ -118,6 +260,35 @@ void FSharedFolderColorEditorModule::ShutdownModule()
     {
         FContentBrowserModule& ContentBrowserModule = FModuleManager::GetModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
         ContentBrowserModule.GetOnSetFolderColor().Remove(SetFolderColorDelegateHandle);
+        SetFolderColorDelegateHandle.Reset();
+    }
+
+    if (FolderPathChangedDelegateHandle.IsValid() && FModuleManager::Get().IsModuleLoaded(TEXT("AssetTools")))
+    {
+        AssetViewUtils::OnFolderPathChanged().Remove(FolderPathChangedDelegateHandle);
+        FolderPathChangedDelegateHandle.Reset();
+    }
+
+    if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
+    {
+        FAssetRegistryModule* AssetRegistryModule = FModuleManager::GetModulePtr<FAssetRegistryModule>(TEXT("AssetRegistry"));
+        if (AssetRegistryModule)
+        {
+            IAssetRegistry* AssetRegistry = AssetRegistryModule->TryGet();
+            if (AssetRegistry)
+            {
+                if (PathsRemovedDelegateHandle.IsValid())
+                {
+                    AssetRegistry->OnPathsRemoved().Remove(PathsRemovedDelegateHandle);
+                    PathsRemovedDelegateHandle.Reset();
+                }
+                if (FilesLoadedDelegateHandle.IsValid())
+                {
+                    AssetRegistry->OnFilesLoaded().Remove(FilesLoadedDelegateHandle);
+                    FilesLoadedDelegateHandle.Reset();
+                }
+            }
+        }
     }
 
     if (GEditor && AutoExportTimerHandle.IsValid())
@@ -130,7 +301,7 @@ void FSharedFolderColorEditorModule::ShutdownModule()
         GEditor->GetTimerManager()->ClearTimer(PendingExportTimerHandle);
     }
 
-    // Final export before shutdown
+    // Final export before shutdown (will NOT checkout if content is unchanged)
     ExportColors();
 
     UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor plugin unloaded"));
@@ -152,23 +323,45 @@ void FSharedFolderColorEditorModule::LoadAndApplyColors()
             
             if (FJsonSerializer::Deserialize(Reader, Root) && Root.IsValid())
             {
+                const bool bCanPrune = IsAssetRegistryReady();
+                bool bIniModified = false;
+
                 // Write all colors to the project ini so they persist and can be version controlled
                 for (const auto& Pair : Root->Values)
                 {
                     FString Key = Pair.Key;
+                    Key.TrimQuotesInline();
+                    Key.TrimStartAndEndInline();
+
+                    if (Key.IsEmpty())
+                    {
+                        continue;
+                    }
+
+                    if (bCanPrune && !DoesFolderExist(Key))
+                    {
+                        UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Skipping non-existent folder '%s' during import"), *Key);
+                        continue;
+                    }
+
                     FString Value;
                     if (Pair.Value.IsValid() && Pair.Value->Type == EJson::String)
                     {
                         Value = Pair.Value->AsString();
                         GConfig->SetString(*Section, *Key, *Value, GEditorPerProjectIni);
+                        bIniModified = true;
                     }
                 }
-                GConfig->Flush(false, GEditorPerProjectIni);
+
+                if (bIniModified)
+                {
+                    GConfig->Flush(false, GEditorPerProjectIni);
+                }
 
                 LastImportedSharedColorsState = Input;
                 LastExportedState = BuildCurrentColorState();
                 
-                UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor: Loaded %d colors from %s"), Root->Values.Num(), *Path);
+                UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Loaded %d colors from %s"), Root->Values.Num(), *Path);
             }
         }
     }
@@ -181,7 +374,7 @@ void FSharedFolderColorEditorModule::CheckAndExportColors()
         LoadAndApplyColors();
     }
 
-    if (HasColorsChanged())
+    if (HasColorsChanged() || (IsAssetRegistryReady() && HasAnyNonExistentFolder()))
     {
         ExportColors();
     }
@@ -189,7 +382,65 @@ void FSharedFolderColorEditorModule::CheckAndExportColors()
 
 void FSharedFolderColorEditorModule::OnFolderColorChanged(const FString& FolderPath)
 {
-    UE_LOG(LogTemp, Verbose, TEXT("SharedFolderColor: folder color changed for %s"), *FolderPath);
+    UE_LOG(LogTemp, Verbose, TEXT("SharedFolderColor: Folder color changed for %s"), *FolderPath);
+    ScheduleExport();
+}
+
+void FSharedFolderColorEditorModule::OnFolderPathChanged(TArrayView<const TTuple<FString, FString>> ChangedPaths)
+{
+    const FString Section = GetColorIniSection();
+    bool bModified = false;
+
+    for (const auto& Pair : ChangedPaths)
+    {
+        const FString& OldPath = Pair.Key;
+        const FString& NewPath = Pair.Value;
+
+        FString ColorValue;
+        if (GConfig->GetString(*Section, *OldPath, ColorValue, GEditorPerProjectIni))
+        {
+            GConfig->RemoveKey(*Section, *OldPath, GEditorPerProjectIni);
+            GConfig->SetString(*Section, *NewPath, *ColorValue, GEditorPerProjectIni);
+            bModified = true;
+            UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Updated folder color path from '%s' to '%s'"), *OldPath, *NewPath);
+        }
+    }
+
+    if (bModified)
+    {
+        GConfig->Flush(false, GEditorPerProjectIni);
+    }
+
+    ScheduleExport();
+}
+
+void FSharedFolderColorEditorModule::OnPathsRemoved(const TArray<FString>& RemovedPaths)
+{
+    const FString Section = GetColorIniSection();
+    bool bModified = false;
+
+    for (const FString& RemovedPath : RemovedPaths)
+    {
+        FString ColorValue;
+        if (GConfig->GetString(*Section, *RemovedPath, ColorValue, GEditorPerProjectIni))
+        {
+            GConfig->RemoveKey(*Section, *RemovedPath, GEditorPerProjectIni);
+            bModified = true;
+            UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Removed deleted folder '%s' from color configuration"), *RemovedPath);
+        }
+    }
+
+    if (bModified)
+    {
+        GConfig->Flush(false, GEditorPerProjectIni);
+    }
+
+    ScheduleExport();
+}
+
+void FSharedFolderColorEditorModule::OnAssetRegistryFilesLoaded()
+{
+    UE_LOG(LogTemp, Verbose, TEXT("SharedFolderColor: Asset registry scan completed, verifying folder existence"));
     ScheduleExport();
 }
 
@@ -211,6 +462,35 @@ bool FSharedFolderColorEditorModule::HasColorsChanged() const
     return BuildCurrentColorState() != LastExportedState;
 }
 
+bool FSharedFolderColorEditorModule::HasAnyNonExistentFolder() const
+{
+    if (!IsAssetRegistryReady())
+    {
+        return false;
+    }
+
+    const FString Section = GetColorIniSection();
+    TArray<FString> SectionLines;
+    GConfig->GetSection(*Section, SectionLines, GEditorPerProjectIni);
+
+    for (const FString& Line : SectionLines)
+    {
+        FString Key, Value;
+        if (Line.Split(TEXT("="), &Key, &Value))
+        {
+            Key.TrimQuotesInline();
+            Key.TrimStartAndEndInline();
+
+            if (!Key.IsEmpty() && !DoesFolderExist(Key))
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 bool FSharedFolderColorEditorModule::HasSharedColorsFileChanged() const
 {
     const FString Path = GetSharedColorsPath();
@@ -220,7 +500,12 @@ bool FSharedFolderColorEditorModule::HasSharedColorsFileChanged() const
     }
 
     FString Input;
-    return FFileHelper::LoadFileToString(Input, *Path) && Input != LastImportedSharedColorsState;
+    if (FFileHelper::LoadFileToString(Input, *Path))
+    {
+        return Input.Replace(TEXT("\r\n"), TEXT("\n")) != LastImportedSharedColorsState.Replace(TEXT("\r\n"), TEXT("\n"));
+    }
+
+    return false;
 }
 
 FString FSharedFolderColorEditorModule::BuildCurrentColorState() const
@@ -229,6 +514,7 @@ FString FSharedFolderColorEditorModule::BuildCurrentColorState() const
 
     TArray<FString> SectionLines;
     GConfig->GetSection(*Section, SectionLines, GEditorPerProjectIni);
+    SectionLines.Sort();
 
     FString CurrentState;
     for (const FString& Line : SectionLines)
@@ -242,47 +528,107 @@ FString FSharedFolderColorEditorModule::BuildCurrentColorState() const
 void FSharedFolderColorEditorModule::ExportColors()
 {
     const FString Section = GetColorIniSection();
-    
+    const FString Path = GetSharedColorsPath();
+
     TArray<FString> SectionLines;
     GConfig->GetSection(*Section, SectionLines, GEditorPerProjectIni);
 
-    TSharedPtr<FJsonObject> Root = MakeShareable(new FJsonObject());
+    const bool bCanPrune = IsAssetRegistryReady();
+    TMap<FString, FString> ValidColors;
+    bool bIniModified = false;
 
     for (const FString& Line : SectionLines)
     {
         FString Key, Value;
         if (Line.Split(TEXT("="), &Key, &Value))
         {
-            // Remove quotes if present
-            Value.RemoveFromStart(TEXT("\""));
-            Value.RemoveFromEnd(TEXT("\""));
-            Root->SetStringField(Key, Value);
+            Key.TrimQuotesInline();
+            Key.TrimStartAndEndInline();
+            Value.TrimQuotesInline();
+            Value.TrimStartAndEndInline();
+
+            if (Key.IsEmpty())
+            {
+                continue;
+            }
+
+            if (bCanPrune && !DoesFolderExist(Key))
+            {
+                UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Removing non-existent folder '%s' from color configuration"), *Key);
+                GConfig->RemoveKey(*Section, *Key, GEditorPerProjectIni);
+                bIniModified = true;
+                continue;
+            }
+
+            ValidColors.Add(Key, Value);
         }
+    }
+
+    if (bIniModified)
+    {
+        GConfig->Flush(false, GEditorPerProjectIni);
+    }
+
+    // Sort keys alphabetically so JSON output is deterministic across machines
+    TArray<FString> SortedKeys;
+    ValidColors.GetKeys(SortedKeys);
+    SortedKeys.Sort();
+
+    TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+    for (const FString& Key : SortedKeys)
+    {
+        Root->SetStringField(Key, ValidColors[Key]);
     }
 
     FString Output;
     TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Output);
-    if (FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
+    if (!FJsonSerializer::Serialize(Root.ToSharedRef(), Writer))
     {
-        const FString Path = GetSharedColorsPath();
-        
-        CheckoutOrMakeWritable(Path);
-        const bool bFileExists = FPlatformFileManager::Get().GetPlatformFile().FileExists(*Path);
+        UE_LOG(LogTemp, Error, TEXT("SharedFolderColor: Failed to serialize colors to JSON"));
+        return;
+    }
 
-        if (FFileHelper::SaveStringToFile(Output, *Path))
+    // Check if the file already exists on disk and whether its content is identical
+    const bool bFileExists = FPlatformFileManager::Get().GetPlatformFile().FileExists(*Path);
+    if (bFileExists)
+    {
+        FString ExistingContent;
+        if (FFileHelper::LoadFileToString(ExistingContent, *Path))
         {
-            LastExportedState = BuildCurrentColorState();
-            LastImportedSharedColorsState = Output;
-            UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor: Auto-exported %d colors to %s"), Root->Values.Num(), *Path);
-
-            if (!bFileExists)
+            TSharedPtr<FJsonObject> ExistingRoot;
+            TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ExistingContent);
+            if (FJsonSerializer::Deserialize(Reader, ExistingRoot) && ExistingRoot.IsValid())
             {
-                MarkForAddIfSourceControlEnabled(Path);
+                if (AreJsonObjectsEqual(Root, ExistingRoot))
+                {
+                    // JSON content is identical! Do not checkout, do not overwrite.
+                    RevertIfUnchanged(Path);
+                    LastExportedState = BuildCurrentColorState();
+                    LastImportedSharedColorsState = ExistingContent;
+                    return;
+                }
             }
+        }
+    }
+
+    // File doesn't exist or content changed: checkout or make writable before saving
+    if (!CheckoutOrMakeWritable(Path))
+    {
+        UE_LOG(LogTemp, Error, TEXT("SharedFolderColor: Cannot make %s writable or check it out from source control"), *Path);
+        return;
+    }
+
+    if (FFileHelper::SaveStringToFile(Output, *Path))
+    {
+        LastExportedState = BuildCurrentColorState();
+        LastImportedSharedColorsState = Output;
+        UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: Auto-exported %d colors to %s"), Root->Values.Num(), *Path);
+
+        if (!bFileExists)
+        {
+            MarkForAddIfSourceControlEnabled(Path);
         }
     }
 }
 
 IMPLEMENT_MODULE(FSharedFolderColorEditorModule, SharedFolderColorEditor)
-
-
