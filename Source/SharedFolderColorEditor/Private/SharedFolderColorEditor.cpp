@@ -85,7 +85,15 @@ static void RevertIfUnchanged(const FString& FilePath)
                 TSharedRef<FRevertUnchanged, ESPMode::ThreadSafe> RevertOp = ISourceControlOperation::Create<FRevertUnchanged>();
                 TArray<FString> Files;
                 Files.Add(FilePath);
-                SourceControlProvider.Execute(RevertOp, Changelist, Files);
+                const ECommandResult::Type Result = SourceControlProvider.Execute(RevertOp, Changelist, Files);
+                if (Result == ECommandResult::Succeeded)
+                {
+                    UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Reverted unchanged file in its existing changelist: %s"), *FilePath);
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor: Failed to revert unchanged file in its existing changelist: %s"), *FilePath);
+                }
             }
             else
             {
@@ -620,6 +628,8 @@ void FSharedFolderColorEditorModule::ExportColors()
                 if (AreJsonObjectsEqual(Root, ExistingRoot))
                 {
                     // JSON content is identical! Do not checkout or overwrite.
+                    UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: JSON unchanged - total colors: %d, added: 0, updated: 0, removed: 0"),
+                        Root->Values.Num());
                     RevertIfUnchanged(Path);
                     LastExportedState = BuildCurrentColorState();
                     LastImportedSharedColorsState = ExistingContent;
@@ -629,25 +639,30 @@ void FSharedFolderColorEditorModule::ExportColors()
         }
     }
 
-    // Log added, updated, or removed folder colors
+    int32 AddedColorCount = 0;
+    int32 UpdatedColorCount = 0;
     for (const auto& Pair : Root->Values)
     {
         if (!ExistingRoot.IsValid() || !ExistingRoot->Values.Contains(Pair.Key))
         {
+            ++AddedColorCount;
             UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Added folder color: '%s' = %s"), *Pair.Key, *Pair.Value->AsString());
         }
         else if (ExistingRoot->Values[Pair.Key]->AsString() != Pair.Value->AsString())
         {
+            ++UpdatedColorCount;
             UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Updated folder color: '%s' = %s"), *Pair.Key, *Pair.Value->AsString());
         }
     }
 
+    int32 RemovedColorCount = 0;
     if (ExistingRoot.IsValid())
     {
         for (const auto& Pair : ExistingRoot->Values)
         {
             if (!Root->Values.Contains(Pair.Key))
             {
+                ++RemovedColorCount;
                 UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Removed folder color: '%s'"), *Pair.Key);
             }
         }
@@ -665,6 +680,8 @@ void FSharedFolderColorEditorModule::ExportColors()
         LastExportedState = BuildCurrentColorState();
         LastImportedSharedColorsState = Output;
         UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: Auto-exported %d colors to %s"), Root->Values.Num(), *Path);
+        UE_LOG(LogTemp, Display, TEXT("SharedFolderColor: JSON statistics - total colors: %d, added: %d, updated: %d, removed: %d"),
+            Root->Values.Num(), AddedColorCount, UpdatedColorCount, RemovedColorCount);
 
         if (!bFileExists)
         {
