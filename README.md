@@ -52,6 +52,7 @@ After installation, use the context menu in the Content Browser to apply a color
 - Colors are stored in a local JSON file (path is configurable) which can be added to your Git repository.
 - To share folder colors with the team, commit and push this JSON file from your project.
 - When a team member updates the JSON from the repository, colors are applied to the project on load or after a reload.
+- When using source control, the plugin keeps the JSON in its existing changelist. If the file is checked out but unchanged, the plugin attempts to revert it in that same changelist.
 
 ## Troubleshooting
 

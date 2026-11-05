@@ -44,6 +44,12 @@ static bool CheckoutOrMakeWritable(const FString& FilePath)
         FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(FilePath, EStateCacheUsage::ForceUpdate);
         if (SourceControlState.IsValid())
         {
+            if (SourceControlState->IsCheckedOut())
+            {
+                UE_LOG(LogTemp, Log, TEXT("SharedFolderColor: File is already checked out; keeping its existing changelist: %s"), *FilePath);
+                return true;
+            }
+
             if (SourceControlState->CanCheckout())
             {
                 TSharedRef<FCheckOut, ESPMode::ThreadSafe> CheckoutOp = ISourceControlOperation::Create<FCheckOut>();
@@ -73,8 +79,18 @@ static void RevertIfUnchanged(const FString& FilePath)
         FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(FilePath, EStateCacheUsage::ForceUpdate);
         if (SourceControlState.IsValid() && SourceControlState->IsCheckedOut())
         {
-            TSharedRef<FRevertUnchanged, ESPMode::ThreadSafe> RevertOp = ISourceControlOperation::Create<FRevertUnchanged>();
-            SourceControlProvider.Execute(RevertOp, FilePath);
+            const FSourceControlChangelistPtr Changelist = SourceControlState->GetCheckInIdentifier();
+            if (Changelist.IsValid())
+            {
+                TSharedRef<FRevertUnchanged, ESPMode::ThreadSafe> RevertOp = ISourceControlOperation::Create<FRevertUnchanged>();
+                TArray<FString> Files;
+                Files.Add(FilePath);
+                SourceControlProvider.Execute(RevertOp, Changelist, Files);
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor: Cannot revert unchanged file because its changelist is unavailable: %s"), *FilePath);
+            }
         }
     }
 }
@@ -603,7 +619,7 @@ void FSharedFolderColorEditorModule::ExportColors()
             {
                 if (AreJsonObjectsEqual(Root, ExistingRoot))
                 {
-                    // JSON content is identical! Do not checkout, do not overwrite.
+                    // JSON content is identical! Do not checkout or overwrite.
                     RevertIfUnchanged(Path);
                     LastExportedState = BuildCurrentColorState();
                     LastImportedSharedColorsState = ExistingContent;
@@ -640,7 +656,7 @@ void FSharedFolderColorEditorModule::ExportColors()
     // File doesn't exist or content changed: checkout or make writable before saving
     if (!CheckoutOrMakeWritable(Path))
     {
-        UE_LOG(LogTemp, Error, TEXT("SharedFolderColor: Cannot make %s writable or check it out from source control"), *Path);
+        UE_LOG(LogTemp, Warning, TEXT("SharedFolderColor: Cannot make %s writable or check it out from source control"), *Path);
         return;
     }
 
@@ -656,10 +672,6 @@ void FSharedFolderColorEditorModule::ExportColors()
         }
         else
         {
-            // Le fichier existait déjà : si le contenu sauvegardé correspond
-            // à la version dépôt (ex. suppression d'un dossier coloré qui ramène
-            // le JSON à son état initial), on revert le checkout pour éviter un
-            // checkout parasite.
             RevertIfUnchanged(Path);
         }
     }
